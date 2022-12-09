@@ -22,12 +22,12 @@ static unsigned int i;
 static int ACK;
 
 void P1_Init(){
-    PM5CTL0 &= ~LOCKLPM5;   //Disable the GPIO power-on default high-impedance mode
-    P1DIR |= BIT0 | BIT3 | BIT4 | BIT5;
+    PM5CTL0 &= ~LOCKLPM5;   //Disable the GPIO power-on default high-impedance mode (slau367p.pdf, p.639)
+    P1DIR |= BIT0 | BIT3 | BIT4 | BIT5; //Los puertos definidos son salidas (slau367p.pdf p.389)
     P1OUT |= BIT5;  //Reset siempre esta en alto.
 }
 
-int BootloaderAccess(void){
+int BootloaderAccess(void){     //(Nota AN2606 Tabla 2 Patron 1 p.24,109)
     P1OUT = BIT3;    //Se realiza la secuencia de bootloader y reset.
     timer_Wait_ms(500);
     P1OUT = BIT3 | BIT5; //Sale del reset manteniendo secuencia bootloader
@@ -39,7 +39,7 @@ int BootloaderAccess(void){
     return ACK;
 }
 
-static void sendCommand(int command){
+static void sendCommand(int command){   //(Nota AN3155 p.5)
 
     complement_command = ~command;
 
@@ -59,15 +59,15 @@ static void receiveCommand_dataRx(uint32_t* arrayRx2, int arrayRxSize2){
         *(arrayRx2-i) = eUSCIA1_UART_receiveACK_eerase();   //*(array-1-i)
 }
 
-static void send_startAddress(int ADDRESS_MSB,int ADDRESS_LSB){
+static void send_startAddress(int ADDRESS_MSB,int ADDRESS_LSB){ 
     //Esta  funcion es identica a send_4bytes_wChecksum()
-    //Para ver como funciona ver funciona ver send_4bytes_wChecksum()
+    //Para ver como funciona ver funciona ver send_4bytes_wChecksum()   
     int ADDRESS_1 = (ADDRESS_MSB & 0x0000FF00) >> 8;
     int ADDRESS_2 = (ADDRESS_MSB & 0x000000FF);
     int ADDRESS_3 = (ADDRESS_LSB & 0x0000FF00) >> 8;
     int ADDRESS_4 = (ADDRESS_LSB & 0x000000FF);
 
-    int checksum = ADDRESS_1 ^ ADDRESS_2 ^ ADDRESS_3 ^ ADDRESS_4;   // Checksum Nota de boot loader de STM32
+    int checksum = ADDRESS_1 ^ ADDRESS_2 ^ ADDRESS_3 ^ ADDRESS_4;   // Checksum Nota AN3155 p.18
                                                     //
 
 
@@ -81,7 +81,7 @@ static void send_startAddress(int ADDRESS_MSB,int ADDRESS_LSB){
     ACK = eUSCIA1_UART_receive();
 }
 
-static void send_4bytes_wChecksum(int WORD_MSB,int WORD_LSB){
+static void send_4bytes_wChecksum(int WORD_MSB,int WORD_LSB){   //Manejo de memoria de 4 bytes (Nota AN2606 p.37)
     /*Ejemplo: Para enviar la palabra de 4 bytes WORD = 0x80706050
      * WORD_MSB = 0x8070
      * WORD_LSB = 0x6050
@@ -102,10 +102,10 @@ static void send_4bytes_wChecksum(int WORD_MSB,int WORD_LSB){
 
     //Espera bit de ACK
     ACK = 0x00;
-    ACK = eUSCIA1_UART_receive();
+    ACK = eUSCIA1_UART_receive();       
 }
 
-static void writeData (uint32_t* arrayTx2, int arrayTxSize2){
+static void writeData (uint32_t* arrayTx2, int arrayTxSize2){   
     int j;
     ACK = 0;
     //int checksum = dataW[0] ^ dataW[1] ^ dataW[2] ^ dataW[3] ^ NBYTES; //Obtiene cheksum de los datos a escribir
@@ -137,7 +137,7 @@ void userSendCommand(int command,uint32_t* arrayRx, int arrayRxSize){
    }
 }
 
-void readMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayRx, int arrayRxSize){
+void readMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayRx, int arrayRxSize){ //Secuencia de lectura (Nota AN3155 p.13)
     //NBYTES: n�mero de bytes a leer.
     //Ejemplo: lectura de 4 bytes NBYTES = 4;
     //NBYTES = NBYTES-1; //El dato que se tiene que enviar al principal es NBYTES-1
@@ -158,7 +158,7 @@ void readMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayRx, int ar
 }
 
 
-void writeMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayTx, int arrayTxSize){
+void writeMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayTx, int arrayTxSize){   //Secuencia de escritura (Nota AN3155 p.18)
     //NBYTES: n�mero de bytes a escribir.
     //Ejemplo: lectura de 4 bytes NBYTES = 4;
     arrayTxSize = arrayTxSize-1;//El dato que se tiene que enviar al principal es NBYTES-1
@@ -173,7 +173,7 @@ void writeMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayTx, int a
     }
 }
 
-void goCommand(int ADDRESS_MSB,int ADDRESS_LSB){
+void goCommand(int ADDRESS_MSB,int ADDRESS_LSB){    //Secuencia para reanudar programa al salir del bootloader (Nota AN3155 p.16)
     sendCommand(GO); //Env�a el comando por UART.
     if (ACK == 0x79) //Espera bit de acknowledge
         send_startAddress(ADDRESS_MSB,ADDRESS_LSB); //Envia direccion de inicio.
@@ -186,7 +186,7 @@ void goCommand(int ADDRESS_MSB,int ADDRESS_LSB){
  * @param FlashSectorCode codigo del sector de memoria a borrar
  */
 
-void eeraseCommand(int FlashSectorCode){
+void eeraseCommand(int FlashSectorCode){    //secuencia de borrado (Nota AN3155 p.21)
     sendCommand(E_ERASE);  //Env�a el comando de extended erase
 
     if (ACK == 0x79){ //Evalua el bit de acknowledge
@@ -204,7 +204,7 @@ void getChecksumCommand(int ADDRESS_MSB,int ADDRESS_LSB,
                         int WORD32b_MSB,int WORD32b_LSB,
                         int CRCpolynomial_MSB, int CRCpolynomial_LSB,
                         int CRCinitialValue_MSB, int CRCinitialValue_LSB,uint32_t* arrayRx, int arrayRxSize)
-{
+{                               //Secuencia para verificar el checksum de un conjunto información (Nota AN3155 p.35)
     sendCommand(GET_CHEKSUM); //Env�a el comando GET_checksum
     if (ACK == 0x79){   //Evalua bit de acknowledge.
         send_startAddress(ADDRESS_MSB, ADDRESS_LSB); //Env�a direcci�n de inicio

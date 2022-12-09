@@ -27,7 +27,7 @@ void divisor_byte(){
 //Esto es la direccion del primer elemento
 //A[]={0,1,2,3,4}
 //A=&A[0]
-void FRAM_write(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int* arrayTx, int arrayTxSize){
+void FRAM_write(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int* arrayTx, int arrayTxSize){   //Secuencia de escritura por SPI (Nota CY15B104Q p.8)
     unsigned int i;
     eUSCIB0_CS1_set_state(0); //CS LOW
     eUSCIB0_SPI_writeByte(WREN);
@@ -53,7 +53,7 @@ void FRAM_write(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int* arrayTx, int arra
     eUSCIB0_CS1_set_state(1);
 }
 
-void FRAM_read(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,uint16_t* arrayRx, int arrayRxSize){
+void FRAM_read(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,uint16_t* arrayRx, int arrayRxSize){   //Secuencia de lectura por SPI (Nota CY15B104Q p.8)
     unsigned int i;
     eUSCIB0_CS1_set_state(0);
     eUSCIB0_SPI_writeByte(READ);
@@ -72,7 +72,7 @@ void FRAM_read(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,uint16_t* arrayRx, int 
     eUSCIB0_CS1_set_state(1);
 }
 
-void FRAM_erase(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int Nbytes){
+void FRAM_erase(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int Nbytes){  //Es la misma secuencia de escritura pero escribe bytes llenos de ceros
     unsigned int i;
     eUSCIB0_CS1_set_state(0); //CS LOW
     eUSCIB0_SPI_writeByte(WREN);

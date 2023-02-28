@@ -23,7 +23,7 @@ void eUSCIA0_UART_Init(){
     //ConfiguraUART
     UCA0CTLW0 |= UCSSEL__SMCLK;                 //Selecciona SM subsytem master clock como reloj del modulo UART 1 MHz/8
     UCA0CTLW0 |= UCMODE_0 | UCPAR | UCPEN; //| UCMSB; //Configura UART
-                                                //(pag.787) manual slau367p.pdf
+                                                //(pag.770) manual slau367p.pdf
     //Configura baudrate a 9600;
     //UCOS16 = 1; UCBRx = 6; UCBRF = 8 = 1000; UCBRSx = 0x20 = 100000;
     UCA0BRW = 6;
@@ -34,7 +34,7 @@ void eUSCIA0_UART_Init(){
     UCA0IE |= UCRXIE;                           //Habilita interrupción de recepción
     __enable_interrupt();                       //Habilita la las interrupciones enmascarables
     UCA0IFG &= ~UCRXIFG;                        //Limpia la bandera de UCA0RX
-                                                //(pag.794) manual slau367p.pdf
+                                                //(pag.784) manual slau367p.pdf
 }
 
 void eUSCIA0_UART_send(int data_Tx){

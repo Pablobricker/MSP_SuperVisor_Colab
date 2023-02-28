@@ -21,12 +21,14 @@ uint32_t complement_command;
 static unsigned int i;
 static int ACK;
 
+//Esta funcion habilita puertos GPIO para la secuencia del bootloader en los pines especiales
 void P1_Init(){
     PM5CTL0 &= ~LOCKLPM5;   //Disable the GPIO power-on default high-impedance mode (slau367p.pdf, p.639)
     P1DIR |= BIT0 | BIT3 | BIT4 | BIT5; //Los puertos definidos son salidas (slau367p.pdf p.389)
     P1OUT |= BIT5;  //Reset siempre esta en alto.
 }
 
+//Esta funcion lleva a cabo la secuencia de acceso al bootloader
 int BootloaderAccess(void){     //(Nota AN2606 Tabla 2 Patron 1 p.24,109)
     P1OUT = BIT3;    //Se realiza la secuencia de bootloader y reset.
     timer_Wait_ms(500);
@@ -52,7 +54,8 @@ static void sendCommand(int command){   //(Nota AN3155 p.5)
     ACK = eUSCIA1_UART_receive();
 }
 
-
+//Esta funcion recibe un numero arrayRxSize de bytes y los guarda en un arreglo definido por el apuntador
+//sigue trabajando a 32 bits, aun no se prueban con cambiaro a 8
 static void receiveCommand_dataRx(uint32_t* arrayRx2, int arrayRxSize2){
     arrayRx2 = arrayRx2+arrayRxSize2-1;
     for (i=0;i<=arrayRxSize2-1;i++)
@@ -104,8 +107,12 @@ static void send_4bytes_wChecksum(int WORD_MSB,int WORD_LSB){   //Manejo de memo
     ACK = 0x00;
     ACK = eUSCIA1_UART_receive();       
 }
-
-static void writeData (uint32_t* arrayTx2, int arrayTxSize2){   
+/*
+* Esta función escribe bytes a la memoria Flash del STM 
+* Enviados por uart y recibe el ack de confirmacion
+* maximo de 256 bytes
+*/
+static void writeData (uint8_t* arrayTx2, int arrayTxSize2){        //modif a 8
     int j;
     ACK = 0;
     //int checksum = dataW[0] ^ dataW[1] ^ dataW[2] ^ dataW[3] ^ NBYTES; //Obtiene cheksum de los datos a escribir
@@ -137,6 +144,13 @@ void userSendCommand(int command,uint32_t* arrayRx, int arrayRxSize){
    }
 }
 
+/*
+* @brief Esta funcion direcciona y lee bytes de localidad especificada a un arreglo de memoria
+* @param ADDRESS_MSB, LSB es la direccion en dos partes donde se va a escribir
+* arrayTx: apuntador del arreglo que recibe los datos
+* arrayTxSize: numero de elementos que se van a escribir en el arreglo
+*sigue trabajando a 32 bits, aun no se prueban con cambiaro a 8
+*/ 
 void readMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayRx, int arrayRxSize){ //Secuencia de lectura (Nota AN3155 p.13)
     //NBYTES: n�mero de bytes a leer.
     //Ejemplo: lectura de 4 bytes NBYTES = 4;
@@ -157,10 +171,13 @@ void readMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayRx, int ar
     }
 }
 
-
-void writeMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayTx, int arrayTxSize){   //Secuencia de escritura (Nota AN3155 p.18)
-    //NBYTES: n�mero de bytes a escribir.
-    //Ejemplo: lectura de 4 bytes NBYTES = 4;
+/*
+* @brief Esta funcion direcciona y escribe bytes contenidos en un arreglo de memoria en la localidad especificada
+* @param ADDRESS_MSB, LSB es la direccion en dos partes donde se va a escribir
+* arrayTx: apuntador del arreglo a escribir
+* arrayTxSize: numero de elementos que se van a escribir del arreglo
+*/    
+void writeMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint8_t* arrayTx, int arrayTxSize){  //modif a 8  //Secuencia de escritura (Nota AN3155 p.18)
     arrayTxSize = arrayTxSize-1;//El dato que se tiene que enviar al principal es NBYTES-1
     sendCommand(WRITE_MEMORY);//Env�a el comando de lectura de memoria
 
@@ -173,6 +190,10 @@ void writeMemoryCommand(int ADDRESS_MSB,int ADDRESS_LSB,uint32_t* arrayTx, int a
     }
 }
 
+/*
+* Esta funcion sale del modo bootloader para dejar que el stm continue con la ejecucion de su codigo 
+* desde una direccion especificada
+*/
 void goCommand(int ADDRESS_MSB,int ADDRESS_LSB){    //Secuencia para reanudar programa al salir del bootloader (Nota AN3155 p.16)
     sendCommand(GO); //Env�a el comando por UART.
     if (ACK == 0x79) //Espera bit de acknowledge

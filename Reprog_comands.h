@@ -9,8 +9,9 @@ uint8_t data_chk;
 //Bandera de recepcion exitosa
 uint8_t Rx_done; 
 uint32_t FRAM_Start_Write = 0x00000000;     //pendiente
-uint8_t Program_NBytes;                     //pendiente
-
+int Program_NBytes;                     //pendiente
+uint16_t Program_StoreAdd[4]= {0x01, 0x02, 0x03, 0x04};
+//uint32_t Program_StoreAdd = 0x08000000;     //pendiente
 
 //Proceso de Reprogramacion
 //Estructura Tx del PC
@@ -35,13 +36,14 @@ void Start_Reprog(){
         
         }
         //Empieza a escribir el codigo recibido en FRAM
-        
+            while(Rx_done == 0){}
             FRAM_REPROG(FRAM_Start_Write);              //Probar la parte de FRAM**
             
     }
     //Recibido el primer paquete de datos
-            
-            while (eUSCIA0_UART_receiveACK_eerase()=!0xF0){
+
+    //Repetir el procedimiento hasta que se envie el byte de fin    
+            while (eUSCIA0_UART_receiveACK_eerase()&&0xF0==0){
                 FRAM_Start_Write = FRAM_Start_Write + Program_NBytes;
                 //Listo para recibir la Siguiente linea de codigo
                 eUSCIA0_UART_send(0x79);      //ACK
@@ -54,7 +56,7 @@ void Start_Reprog(){
         
         }
         //Empieza a escribir el codigo recibido en FRAM
-        
+            while (Rx_done == 0){}
             FRAM_REPROG(FRAM_Start_Write);              
             }
             
@@ -109,11 +111,39 @@ void FRAM_REPROG(uint32_t FRAM_Start){
 
     FRAM_write((FRAM_Start>>16)&0xFF,(FRAM_Start>>8)&0xFF,FRAM_Start&0xFF,&Program_NBytes,1);
             FRAM_Start++;
-        //Luego el contenido de los bytes a escribir    INCLUYE DIRECCION Y RECORDTYPE???
+            //Luego el contenido de los bytes a escribir    INCLUYE DIRECCION Y RECORDTYPE???
             FRAM_write((FRAM_Start>>16)&0xFF,(FRAM_Start>>8)&0xFF,FRAM_Start&0xFF,Program_StoreAdd,Program_NBytes);
+            FRAM_Start+=Program_NBytes;
+            FRAM_write((FRAM_Start>>16)&0xFF,(FRAM_Start>>8)&0xFF,FRAM_Start&0xFF,&data_chk,1);
         
 }
 
+
+void masterReprogramationRutine(uint32_t FRAM_initialAddress,uint32_t Flash_initialAddress){
+    //Esta funcion asume que el respaldo del programa del master ya ha sido cargado en la FRAM.
+    int i;
+    uint16_t FRAMvectorBuffer[sizeBufferVector] = {0}; //Inicializa vector en 0.
+    uint8_t vectorBuffer[sizeBufferVector] = {0};
+    //int FRAMvectorBufferSize = sizeof(FRAMvectorBuffer)/sizeof(FRAMvectorBuffer[0]); 
+    unsigned int j;
+    uint32_t FRAM_actualAddress = FRAM_initialAddress;
+    uint32_t Flash_actualAddress = Flash_initialAddress;
+    ACK= BootloaderAccess();
+    for (i = 0; i < masterProgramSize; i++) {
+        FRAM_read(((FRAM_actualAddress)>>16)&0xFF,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress & 0xFF, FRAMvectorBuffer, sizeBufferVector);
+        //Ejecutar alguna rutina para verificar la integridad de los datos (No se tiene que desarrollar ahora).
+        //Hacer la conversion de 16 a 8 bits para que se puedan enviar bien los datos
+        //Para mas optimizazion modificar las funciones de escritura y lectura de la FRAM a 8 bits
+        //Aunque es poco probable que esto suceda ya que se necesita vaciar o llenar el buffer SPI de 16 bits para que la funcion termine.
+        for (j=0; j<=sizeBufferVector; j++){
+            vectorBuffer[j] = FRAMvectorBuffer[j]&0xFF;
+        }
+        
+        writeMemoryCommand(((Flash_actualAddress)>>16)&0xFFFF,(Flash_actualAddress)&0xFFFF , vectorBuffer, sizeBufferVector);
+        FRAM_actualAddress = FRAM_actualAddress + sizeBufferVector;
+        Flash_actualAddress = Flash_actualAddress + sizeBufferVector;
+    }
+}
 
 //funcion con la intension de vaciar el buffer vector donde van los datos de programa 
 //en caso de que se hallan corrompido y se tenga que volver a escribir.
@@ -125,6 +155,34 @@ void FRAM_REPROG(uint32_t FRAM_Start){
 //    }
 //}
 
+
+void receivePrincipalComputerData(uint8_t *IncAdd){
+    uint8_t dataCheck;
+    uint8_t checksum;
+    uint32_t FRAM_nextWAddress;
+    uint8_t dataX[NumDataRx];
+    //mientras la entrada de control sea 1 :
+    while (P4IN == BIT2){//??????
+        dataX[0] = eUSCIA0_UART_receive();//Se recibe dato 1
+        dataX[1] = eUSCIA0_UART_receive();//Se recibe dato 2
+        dataX[2] = eUSCIA0_UART_receive();//Se recibe dato 3
+        dataX[3] = eUSCIA0_UART_receive();//Se recibe dato 4
+        checksum = eUSCIA0_UART_receive();//Se recibe checksum
+        //comprobar checksum
+        dataCheck = dataX[0] + dataX[1] + dataX[2] + dataX[3] + checksum;
+        //Si los datos se recibieron correctamente data check tiene que ser 0xFF
+        if(dataCheck == 0xFF){
+            FRAM_nextWAddress=FRAM_startAddress+IncAdd;
+            FRAM_write((FRAM_nextWAddress>>24)&0xFF,(FRAM_nextWAddress>>16)&0xFF,FRAM_nextWAddress&0xFF,dataX,NumDataRx);
+
+            eUSCIA0_UART_send(0X79); //contesta bit de ACK
+            //La computadora principal debera de enviar los cuatro bytes siguientes
+        }else{
+            eUSCIA0_UART_send(0X7F); //bit NACK
+        }
+    }
+
+}
 
 
 

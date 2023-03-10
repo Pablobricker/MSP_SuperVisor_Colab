@@ -15,84 +15,21 @@ uint32_t dataW[]={0x10,0x17,0x22,0x33};
 #include <TIMERA0.h>
 #include <eUSCIA1_UART.h>
 #include <STMF407xx_bootloaderCommands.h>
-#include <eUSCIA0_UART.h>
+//#include <eUSCIA0_UART.h>
 #include <eUSCIB0_SPI.h>
 #include <FRAM_commands.h>
 #include <RTCB.h>
+#include <Reprog_comands.h>
 
 
 
 
 
-void receivePrincipalComputerData(uint8_t *IncAdd){
-    uint8_t dataCheck;
-    uint8_t checksum;
-    uint32_t FRAM_nextWAddress;
-    uint8_t dataX[NumDataRx];
-    //mientras la entrada de control sea 1 :
-    while (P4IN == BIT2){
-        dataX[0] = eUSCIA0_UART_receive();//Se recibe dato 1
-        dataX[1] = eUSCIA0_UART_receive();//Se recibe dato 2
-        dataX[2] = eUSCIA0_UART_receive();//Se recibe dato 3
-        dataX[3] = eUSCIA0_UART_receive();//Se recibe dato 4
-        checksum = eUSCIA0_UART_receive();//Se recibe checksum
-        //comprobar checksum
-        dataCheck = dataX[0] + dataX[1] + dataX[2] + dataX[3] + checksum;
-        //Si los datos se recibieron correctamente data check tiene que ser 0xFF
-        if(dataCheck == 0xFF){
-            FRAM_nextWAddress=FRAM_startAddress+IncAdd;
-            FRAM_write((FRAM_nextWAddress>>24)&0xFF,(FRAM_nextWAddress>>16)&0xFF,FRAM_nextWAddress&0xFF,dataX,NumDataRx);
-
-            eUSCIA0_UART_send(0X79); //contesta bit de ACK
-            //La computadora principal debera de enviar los cuatro bytes siguientes
-        }else{
-            eUSCIA0_UART_send(0X7F); //bit NACK
-        }
-    }
-
-}
-
-void FRAMBackupSettingRutine(){     //Esta funcion debe ser activada por hardware, como un caso especial de una rutina a servicio de interrupcion ISR
-    uint8_t RxByt;
-    uint8_t Backup_done=0;
-    int i=0;
-            RxByt = eUSCIA0_UART_receive();
-        if (RxByt == 0x0F){
-                                 //Incremento en la direccion en multiplos de 4 porque son 4 bytes
-            receivePrincipalComputerData(4*i);
-            i++;
-        }
-        if (RxByt == 0xF0){
-            Backup_done = 1;
-        }
-}
 
 
-void masterReprogramationRutine(uint32_t FRAM_initialAddress,uint32_t Flash_initialAddress){
-    //Esta funcion asume que el respaldo del programa del master ya ha sido cargado en la FRAM.
-    int i;
-    uint16_t FRAMvectorBuffer[sizeBufferVector] = {0}; //Inicializa vector en 0.
-    uint8_t vectorBuffer[sizeBufferVector] = {0};
-    //int FRAMvectorBufferSize = sizeof(FRAMvectorBuffer)/sizeof(FRAMvectorBuffer[0]); 
-    unsigned int j;
-    uint32_t FRAM_actualAddress = FRAM_initialAddress;
-    uint32_t Flash_actualAddress = Flash_initialAddress;
-    ACK= BootloaderAccess();
-    for (i = 0; i < masterProgramSize; i++) {
-        FRAM_read(((FRAM_actualAddress)>>16)&0xFF,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress & 0xFF, FRAMvectorBuffer, sizeBufferVector);
-        //Ejecutar alguna rutina para verificar la integridad de los datos (No se tiene que desarrollar ahora).
-        //Hacer la conversion de 16 a 8 bits para que se puedan enviar bien los datos
-        //Para mas optimizazion modificar las funciones de escritura y lectura de la FRAM a 8 bits
-        //Aunque es poco probable que esto suceda ya que se necesita vaciar o llenar el buffer SPI de 16 bits para que la funcion termine.
-        for (j=0; j<=sizeBufferVector; j++){
-            vectorBuffer[j] = FRAMvectorBuffer[j]&0xFF;
-        }
-        
-        writeMemoryCommand(((Flash_actualAddress)>>16)&0xFFFF,(Flash_actualAddress)&0xFFFF , vectorBuffer, sizeBufferVector);
-        FRAM_actualAddress = FRAM_actualAddress + sizeBufferVector;
-        Flash_actualAddress = Flash_actualAddress + sizeBufferVector;
-    }
-}
+
+
+
 
 int main(void)
 {
@@ -120,8 +57,8 @@ int main(void)
 
 
     //Comentario pablo
-//    int FRAM_dataW[892] = {     //Para FRAM
-//uint8_t FRAM_REACO[892] = {      //Para bootloader  //Subir el programa cacho por cacho pero en la direccion de donde lo sacaste y si prende el led ya chingaste
+//    int FRAM_dataW[892] = {     //Para escribir FRAM
+//uint8_t FRAM_REACO[892] = {      //Para escribir bootloader  //Subir el programa cacho por cacho pero en la direccion de donde lo sacaste y si prende el led ya chingaste
 //        // Offset 0x080001C0 to 0x0800053B
 //        0xD1, 0x04, 0x00, 0x08, 0x10, 0xB5, 0x05, 0x4C, 0x23, 0x78, 0x33, 0xB9,
 //        0x04, 0x4B, 0x13, 0xB1, 0x04, 0x48, 0xAF, 0xF3, 0x00, 0x80, 0x01, 0x23,
@@ -202,16 +139,31 @@ int main(void)
 
 
 
-    masterReprogramationRutine(FRAM_startAddress,Flash_startAddress);
+    //masterReprogramationRutine(FRAM_startAddress,Flash_startAddress);
+    
+    
     //ACK = BootloaderAccess();           //Solo se puede guardar hasta 256 bytes en el bootloader antes de que mande error el MSP
     //eeraseCommand(11);//stmf407 080e
     //Ultimo sector de flash de la stmf407 = 11 = 0x080E0000
     //ultimo sector de flash de la f466 = 7 = 0x08060000
-    eeraseCommand(7); // FRAM_REACO, FRAM_RdataSize  //Se puede enviar por cachos con la funcion del bootloader
+    
+    
+    //eeraseCommand(7); // FRAM_REACO, FRAM_RdataSize  //Se puede enviar por cachos con la funcion del bootloader
 
 
 
-    goCommand(0x0800, 0x0000);
+    //goCommand(0x0800, 0x0000);
+uint16_t FRAM_test_Buff[6]={0};      //Afuerzas se tiene que leer en formato de 16 bits pq no se llena la fifo del SPI con 8
+//FRAM_read(0x00,0x08,0x00,FRAM_test_Buff,4);
+
+//Program_StoreAdd[] =;
+Program_NBytes= 4;
+data_chk = 0x10;
+
+FRAM_REPROG(0x00000800);
+//FRAM_erase(0x00,0x08,0x00,6);
+//FRAM_write(0x00,0x08,0x05,&data_chk,1);
+FRAM_read(0x00,0x08,00,FRAM_test_Buff,6);
 
     while(1){
 	}

@@ -5,6 +5,8 @@
 uint32_t command_dataRx[NumDataRx];              //Aqui antes estaban declarados como uint32_t
 uint32_t dataW[]={0x10,0x17,0x22,0x33};
 
+uint8_t Program_StoreAdd[7]= {0x03, 0x08, 0x00 , 0x01, 0x02, 0x03, 0x04};//Este formato es para recibir leer de FRAM
+
 #define masterProgramSize 4
 #define sizeBufferVector 223
 #define FRAM_startAddress 0x00000900
@@ -19,14 +21,88 @@ uint32_t dataW[]={0x10,0x17,0x22,0x33};
 #include <eUSCIB0_SPI.h>
 #include <FRAM_commands.h>
 #include <RTCB.h>
-#include <Reprog_comands.h>
+//#include <Reprog_comands.h>
+
+
+void FRAM_REPROG(uint8_t* Global_Buffer){
+
+    int nByt = *(Global_Buffer);
+
+    // Setting 16-bit FRAM Address pointer
+    uint16_t FRAM_WRT_PTR = *(Global_Buffer+1);
+    FRAM_WRT_PTR = (FRAM_WRT_PTR <<8)| *(Global_Buffer+2);
+
+    uint8_t data_chksum = nByt;
+
+    int MSP2FRAMvB[25];
+
+
+    int j;
+
+    for (j=0; j<nByt; j++){
+        MSP2FRAMvB[j] = *(Global_Buffer+j+3);      //salta el numero de datos y la direccion
+        data_chksum = data_chksum ^ *(MSP2FRAMvB+j);
+    }
+
+    /*Estructura de datos en FRAM
+    *numero de datos
+    *datos
+    *checksum de datos
+    */
+    FRAM_write((FRAM_WRT_PTR>>16)&0xFF,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,&nByt,1);
+    FRAM_WRT_PTR++;
+    FRAM_write((FRAM_WRT_PTR>>16)&0xFF,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,MSP2FRAMvB,nByt);
+    FRAM_WRT_PTR=FRAM_WRT_PTR +nByt;
+    FRAM_write((FRAM_WRT_PTR>>16)&0xFF,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,&data_chksum,1);
+
+}
 
 
 
 
 
+void masterReprogramationRutine(uint32_t FRAM_initialAddress, uint32_t Flash_initialAddress1, int Rx_ready_buffers){
+    uint32_t FRAM_actualAddress = FRAM_initialAddress;
+    uint32_t Flash_actualAddress = Flash_initialAddress1;
+
+    //Esta funcion asume que el respaldo del programa del master ya ha sido cargado en la FRAM.
+
+    uint16_t FRAM2MSP_VB[25]; //Vector de Buffer de FRAM ---> MSP
+    uint8_t MSP2Master_VB[25];//Vector de Buffer de MSP ---> Master La longitud del vector receptor simpre es mayor que la cantidad de datos Rx
+
+    //int FRAMvectorBufferSize = sizeof(FRAMvectorBuffer)/sizeof(FRAMvectorBuffer[0]);
+    unsigned int i;
 
 
+    ACK= BootloaderAccess();
+    for (i=0; i<Rx_ready_buffers; i++){
+
+        uint16_t BFFSZ_HX;
+            FRAM_read(((FRAM_actualAddress)>>16)&0xFF,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress&0xFF,&BFFSZ_HX, 1);
+            FRAM_actualAddress++;
+            int BufferVectorSize = (int) BFFSZ_HX;
+
+            //uint16_t FRAM2MSP_VB[BufferVectorSize]; //Vector de Buffer de FRAM ---> MSP
+            //uint8_t MSP2Master_VB[BufferVectorSize];//Vector de Buffer de MSP ---> Master
+
+
+        FRAM_read(((FRAM_actualAddress)>>16)&0xFF,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress & 0xFF, FRAM2MSP_VB, BufferVectorSize);
+        //Ejecutar alguna rutina para verificar la integridad de los datos (No se tiene que desarrollar ahora).
+        //Hacer la conversion de 16 a 8 bits para que se puedan enviar bien los datos
+        //Para mas optimizazion modificar las funciones de escritura y lectura de la FRAM a 8 bits
+        //Aunque es poco probable que esto suceda ya que se necesita vaciar o llenar el buffer SPI de 16 bits para que la funcion termine.
+
+        unsigned int j;
+        for (j=0; j<=BufferVectorSize; j++){
+            MSP2Master_VB[j] = FRAM2MSP_VB[j]&0xFF;}
+
+
+        writeMemoryCommand(((Flash_actualAddress)>>16)&0xFFFF,(Flash_actualAddress)&0xFFFF , MSP2Master_VB, BufferVectorSize);
+        FRAM_actualAddress = FRAM_actualAddress + BufferVectorSize+1;       //El +1 es para saltar el checksum
+        Flash_actualAddress = Flash_actualAddress + BufferVectorSize;
+    }
+
+}
 
 
 
@@ -153,21 +229,29 @@ int main(void)
 
 
     //goCommand(0x0800, 0x0000);
-uint16_t FRAM_test_Buff[6]={0};      //Afuerzas se tiene que leer en formato de 16 bits pq no se llena la fifo del SPI con 8
+//uint8_t FRAM_test_Buff[4]={0x10,0x90,0x34,0x78};      //Afuerzas se tiene que leer en formato de 16 bits pq no se llena la fifo del SPI con 8
+uint16_t FRAM_test_Buff[50]={0};
 //FRAM_read(0x00,0x08,0x00,FRAM_test_Buff,4);
 
-//Program_StoreAdd[] =;
-Program_NBytes= 4;
-data_chk = 0x10;
 
-FRAM_REPROG(0x00000800);
-//FRAM_erase(0x00,0x08,0x00,6);
+
+//FRAM_REPROG(Program_StoreAdd);
+//FRAM_erase(0x00,0x04,0x58,36);
 //FRAM_write(0x00,0x08,0x05,&data_chk,1);
-FRAM_read(0x00,0x08,00,FRAM_test_Buff,6);
+//FRAM_read(0x00,0x00,0x00,FRAM_test_Buff,36);
 
+masterReprogramationRutine(0x00000000, 0x08060000, 4);
+//ACK= BootloaderAccess();
+//eeraseCommand(7);
+//writeMemoryCommand(0x0806,0x0000,FRAM_test_Buff,4);
+
+goCommand(0x0800, 0x0000);
     while(1){
 	}
 }
+
+
+
 
 #pragma vector = PORT4_VECTOR
 __interrupt void PORT4_ISR(void){

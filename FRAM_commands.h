@@ -1,4 +1,7 @@
 #include <stdint.h>
+
+/*Drivers para la comunicacion con la memoria FRAM CY15B104Q
+https://www.infineon.com/dgdl/Infineon-CY15B104Q_4-Mbit_(512_K_8)_Serial_(SPI)_F-RAM-DataSheet-v06_00-EN.pdf?fileId=8ac78c8c7d0d8da4017d0ecdc6684848*/
 #define WREN   0x06
 #define WRDI   0x04
 #define RDSR   0x05
@@ -27,7 +30,10 @@ void divisor_byte(){
 //Esto es la direccion del primer elemento
 //A[]={0,1,2,3,4}
 //A=&A[0]
-void FRAM_write(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int* arrayTx, int arrayTxSize){   //Secuencia de escritura por SPI (Nota CY15B104Q p.8)
+
+//Operacion de escritura (p.8)
+//Diagrama de tiempos (p.9)
+void FRAM_write(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int* arrayTx, int arrayTxSize){
     unsigned int i;
     eUSCIB0_CS1_set_state(0); //CS LOW
     eUSCIB0_SPI_writeByte(WREN);
@@ -52,8 +58,9 @@ void FRAM_write(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int* arrayTx, int arra
     }
     eUSCIB0_CS1_set_state(1);
 }
-
-void FRAM_read(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,uint16_t* arrayRx, int arrayRxSize){   //Secuencia de lectura por SPI (Nota CY15B104Q p.8)
+//Operacion de lectura (p.8)
+//Diagrama de tiempos (p.9)
+void FRAM_read(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,uint16_t* arrayRx, int arrayRxSize){
     unsigned int i;
     eUSCIB0_CS1_set_state(0);
     eUSCIB0_SPI_writeByte(READ);
@@ -71,8 +78,8 @@ void FRAM_read(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,uint16_t* arrayRx, int 
     }
     eUSCIB0_CS1_set_state(1);
 }
-
-void FRAM_erase(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int Nbytes){  //Es la misma secuencia de escritura pero escribe bytes llenos de ceros
+//Funcion de borrado es la funcion de escritura que escribe ceros
+void FRAM_erase(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int Nbytes){
     unsigned int i;
     eUSCIB0_CS1_set_state(0); //CS LOW
     eUSCIB0_SPI_writeByte(WREN);
@@ -95,5 +102,3 @@ void FRAM_erase(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int Nbytes){  //Es la 
     }
     eUSCIB0_CS1_set_state(1);
 }
-
-

@@ -1,42 +1,107 @@
 #include <msp430.h>
 #include <stdint.h>
+#include "eUSCIA1_UART.h"
+#include "STMF407xx_bootloaderCommands.h"
+#include "eUSCIB0_SPI.h"
+#include "TIMERA0.h"
+#include "FRAM_commands.h"
 
-#define NumDataRx 4
-uint32_t command_dataRx[NumDataRx];              //Aqui antes estaban declarados como uint32_t
-uint32_t dataW[]={0x10,0x17,0x22,0x33};
+/*
+ * Recibe un archivo .hex completo,
+ * Los datos de interes de cada linea
+ * se guardan en los vectores:
+ * frame_1 (Primera linea de datos del archivo hex)
+ * frame_2 (Segunda linea de datos del archivo hex)
+ * y asi consecutivamente para las 5 lineas del archivo hex de prueba
+ * */
 
-uint8_t Program_StoreAdd[7]= {0x03, 0x08, 0x00 , 0x01, 0x02, 0x03, 0x04};//Este formato es para recibir leer de FRAM
+/* Dos  comunicaciones tipo UART
+ * Interfaz serial para recepcion de datos de programa MSP <--- (puerto COM)PC
+ * Comunicacion de transmision del programa principal MSP ---> Maestro
+ * */
 
-#define masterProgramSize 4
-#define sizeBufferVector 223
-#define FRAM_startAddress 0x00000900
-#define Flash_startAddress 0x080001C0
+//Configura UART
+//- 8 bits de datos.
+//- Sin bit de paridad.
+//- 1 bit de stop.
+//- 9600 baudrate.
 
+/*
+ * Trama recibida desde el dispositivo externo
+ * data[0] - Numero de bytes de datos
+ * dato[1] - Address MSB (Sin offset)
+ * dato[2] - Address LSB (Sin offset)
+ * dato[3] - Primer dato
+ * dato[3+data[0]] - dato n (dato final)
+ * dato[4+data[0]] - dato n (checksum)
+ * */
 
+#define SIZE_BUFFER 100             //Tamaño maximo de un buffer de datos por cada trama
+//Bytes recibidos de PC mediante interrupciones de UART
+#define START_BYTE 0xF              //Byte para empezar la reporgramacion
+#define END_BYTE 0xF0               //Byte para terminar la reprogramacion
+//Bytes recibidos del UC maestro para continuar la comunicacion
+#define ACK_BYTE 0x79               //Byte ACK para comunicacion MSP-->maestro
+#define NACK_BYTE 0x7F              //Byte NACK para comunicacion con el maestro
 
-#include <TIMERA0.h>
-#include <eUSCIA1_UART.h>
-#include <STMF407xx_bootloaderCommands.h>
-//#include <eUSCIA0_UART.h>
-#include <eUSCIB0_SPI.h>
-#include <FRAM_commands.h>
-#include <RTCB.h>
-//#include <Reprog_comands.h>
+uint8_t update_Code_Buffer[SIZE_BUFFER];    //Buffer Global de datos recibidos de PC
+uint8_t update_Code_Byte_Count = 0;         //Indice de bytes para el llenado del buffer global
+uint8_t update_Code_first_Byte = 1;         //
+uint8_t update_Code_enable = 0;             //Indica en la rutina main que se han empezado a recibir datos para reprogramacion
+uint8_t update_Code_frame_ready = 0;        //Indica si un frame de datos termino de recibirse 
+
+uint16_t FRAM_WRT_PTR = 0x0000;             //Puntero global movil para la escritura en FRAM
+uint16_t StartFRAM_ProgramAddress = 0x0000; //Puntero de la primera localidad en FRAM para lectura del programa
+uint8_t ready_frames_count = 0;             //Conteo de las tramas recibidas de PC
+                                            //Sirve para saber cuando parar de leer el programa almacenado en FRAM
+
+uint8_t frame_1[25] = {0};
+uint8_t frame_2[25] = {0};
+uint8_t frame_3[25] = {0};
+uint8_t frame_4[25] = {0};
+uint8_t frame_5[25] = {0};
+
+uint16_t Each_Frame_address[50]={};     //Buffer global para el manejo del offset de direccion para el guardado en FLASH
+                                        //Truncado a 50 frames recibidas
+
+uint16_t FRAM_tstBuff[25] = {0};        //Variable de pruenba (omitir)
+
+/******ESCRITURA DEL PROGRAMA EN FRAM***********/
+//Esta funcion escribe frame a la vez
+//Param Global_Buffer = update_Code_Buffer para cuando haya una recepcion de datos de PC
 
 
 void FRAM_REPROG(uint8_t* Global_Buffer){
 
-    int nByt = *(Global_Buffer);
 
-    // Setting 16-bit FRAM Address pointer
-    uint16_t FRAM_WRT_PTR = *(Global_Buffer+1);
-    FRAM_WRT_PTR = (FRAM_WRT_PTR <<8)| *(Global_Buffer+2);
+/* Estructura de datos recibidos de PC
+ * Numero de datos [1 byte]
+ * OFFSET para FLASH [2 bytes]
+ * datos [n bytes]
+ * checksum [1 byte]
+*/
+    int nByt = *(Global_Buffer);    // Numero de datos
 
-    uint8_t data_chksum = nByt;
+    // Saving 16-bit Flash OFFSET pointer
 
-    int MSP2FRAMvB[25];
+     Each_Frame_address[ready_frames_count-1] = *(Global_Buffer+1);
+     Each_Frame_address[ready_frames_count-1] = Each_Frame_address[ready_frames_count-1]<<8;
+     Each_Frame_address[ready_frames_count-1] = Each_Frame_address[ready_frames_count-1] | (*(Global_Buffer+2)&0xFF);
 
+//    FRAM_WRT_PTR = FRAM_WRT_PTR + 2;
+//    if(ready_frames_count == 1){
+//        FRAM_WRT_PTR = FRAM_WRT_PTR-2;
+//        StartFRAM_ProgramAddress = FRAM_WRT_PTR;//En la direccion mandada se empieza a escribir en FRAM
+//
+//    }
 
+    uint8_t data_chksum = nByt;     //Checksum calculado internamente para guardar
+
+    //Conversion del tipo de dato para escritura en FRAM
+    
+    int MSP2FRAMvB[25]; //Buffer local de datos para escritura en FRAM 
+                        //La longitud inicial del buffer debe ser mayor al numero de datos
+                        //Ya con eso no hay pdos
     int j;
 
     for (j=0; j<nByt; j++){
@@ -47,19 +112,29 @@ void FRAM_REPROG(uint8_t* Global_Buffer){
     /*Estructura de datos en FRAM
     *numero de datos
     *datos
-    *checksum de datos
+    *checksum de datos calculado
     */
     FRAM_write((FRAM_WRT_PTR>>16)&0xFF,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,&nByt,1);
     FRAM_WRT_PTR++;
     FRAM_write((FRAM_WRT_PTR>>16)&0xFF,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,MSP2FRAMvB,nByt);
     FRAM_WRT_PTR=FRAM_WRT_PTR +nByt;
     FRAM_write((FRAM_WRT_PTR>>16)&0xFF,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,&data_chksum,1);
+    FRAM_WRT_PTR++;
+}
 
+void eUSCIA0_UART_send(int data_Tx){
+    while((UCA0STATW & UCBUSY) == UCBUSY){}
+    UCA0TXBUF = data_Tx; //Dato a enviar (pag.791) manual slau367p.pdf
 }
 
 
 
-
+/*******REPROGRAMACION DEL UC MAESTRO****************/
+//Esta funcion escribe todos los frames guardados en la FRAM segun el numero de frames recibidos de PC
+//param FRAM_initalAddress puntero de inicio del FRAM donde se almacena el programa (fijado en 0x0)
+//param Flash_initialAddress puntero de inicio donde el programa sera cargado al Flash UC maestro 
+// Adaptar para usar segun cada offset de frame.****
+//param Rx_ready_buffers numero de frames almacenados en FRAM para un programa completo (inicia en 0x0 en un reset)
 
 void masterReprogramationRutine(uint32_t FRAM_initialAddress, uint32_t Flash_initialAddress1, int Rx_ready_buffers){
     uint32_t FRAM_actualAddress = FRAM_initialAddress;
@@ -68,35 +143,36 @@ void masterReprogramationRutine(uint32_t FRAM_initialAddress, uint32_t Flash_ini
     //Esta funcion asume que el respaldo del programa del master ya ha sido cargado en la FRAM.
 
     uint16_t FRAM2MSP_VB[25]; //Vector de Buffer de FRAM ---> MSP
-    uint8_t MSP2Master_VB[25];//Vector de Buffer de MSP ---> Master La longitud del vector receptor simpre es mayor que la cantidad de datos Rx
+    uint8_t MSP2Master_VB[25];//Vector de Buffer de MSP ---> Master
+                                //Truncados a 25 bytes
 
     //int FRAMvectorBufferSize = sizeof(FRAMvectorBuffer)/sizeof(FRAMvectorBuffer[0]);
     unsigned int i;
 
-
+    
     ACK= BootloaderAccess();
-    for (i=0; i<Rx_ready_buffers; i++){
+    eeraseCommand(7);       //Region de Flash para hacer pruebas (sector 7 0x08060000) en la nucleo F446RE
 
-        uint16_t BFFSZ_HX;
+    for (i=0; i<Rx_ready_buffers; i++){
+        //Lectura de frames almacenados en FRAM
+
+        uint16_t BFFSZ_HX;  //Numero datos formato 16-bit
             FRAM_read(((FRAM_actualAddress)>>16)&0xFF,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress&0xFF,&BFFSZ_HX, 1);
             FRAM_actualAddress++;
-            int BufferVectorSize = (int) BFFSZ_HX;
-
-            //uint16_t FRAM2MSP_VB[BufferVectorSize]; //Vector de Buffer de FRAM ---> MSP
-            //uint8_t MSP2Master_VB[BufferVectorSize];//Vector de Buffer de MSP ---> Master
-
+            int BufferVectorSize = (int) BFFSZ_HX;  //Numero de datos formato int
 
         FRAM_read(((FRAM_actualAddress)>>16)&0xFF,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress & 0xFF, FRAM2MSP_VB, BufferVectorSize);
         //Ejecutar alguna rutina para verificar la integridad de los datos (No se tiene que desarrollar ahora).
         //Hacer la conversion de 16 a 8 bits para que se puedan enviar bien los datos
         //Para mas optimizazion modificar las funciones de escritura y lectura de la FRAM a 8 bits
-        //Aunque es poco probable que esto suceda ya que se necesita vaciar o llenar el buffer SPI de 16 bits para que la funcion termine.
+        //Formato de 16-bit necesario para que funcionen los  Drivers de SPI. La FIFO de rececpion SPI es de 16 bits
 
+        //Conversion de formato para compatibilidad con el UART del maestro 16-->8-bit
         unsigned int j;
         for (j=0; j<=BufferVectorSize; j++){
             MSP2Master_VB[j] = FRAM2MSP_VB[j]&0xFF;}
 
-
+        //Escritura UART hacia la Flash
         writeMemoryCommand(((Flash_actualAddress)>>16)&0xFFFF,(Flash_actualAddress)&0xFFFF , MSP2Master_VB, BufferVectorSize);
         FRAM_actualAddress = FRAM_actualAddress + BufferVectorSize+1;       //El +1 es para saltar el checksum
         Flash_actualAddress = Flash_actualAddress + BufferVectorSize;
@@ -104,151 +180,200 @@ void masterReprogramationRutine(uint32_t FRAM_initialAddress, uint32_t Flash_ini
 
 }
 
+void MSP430_Clk_Config(){
+    CSCTL0_H = CSKEY >> 8;
+    CSCTL1 = DCOFSEL_0 | DCORSEL;
+    CSCTL2 = SELA__VLOCLK | SELS__DCOCLK | SELM__DCOCLK;
+    CSCTL3 = DIVA__1 | DIVS__1 | DIVM__1;
+    CSCTL0_H = 0;
+}
 
+void eUSCIA0__UART_Init(){
+    UCA0CTLW0 |= UCSWRST;
+    UCA0CTLW0 |= UCSSEL__SMCLK;
+    UCA0BRW |= 6;
+    UCA0MCTLW |= 0x20<<8 | UCOS16 | 8<<4;
 
+    P2SEL0 &= ~(BIT0 | BIT1);                   //P2SEL0.x = 0
+    P2SEL1 |= BIT0 | BIT1;                      //P2SEL1.x = 1; Selecciona la funci�n de UART en P2.1 y P2.0
+    PM5CTL0 &= ~LOCKLPM5;
+
+    UCA0CTLW0 &= ~UCSWRST;
+
+    UCA0IE |= UCRXIE;                           //Habilita interrupci�n de recepci�n
+                      //Habilita la las interrupciones enmascarables
+    UCA0IFG &= ~UCRXIFG;
+    _enable_interrupt();
+}
+
+void LED_Init(){
+    P1DIR |= BIT0;
+}
+
+void LED_TurnOn(){
+    P1OUT |= BIT0;
+}
+
+void LED_TurnOff(){
+    P1OUT &= ~BIT0;
+}
+
+void LED_Toggle(){
+    P1OUT ^= BIT0;
+}
+
+uint8_t Frame_Verify_Checksum(uint8_t data[]){
+    uint8_t i = 0;
+    uint8_t local_checksum = 0;
+    uint8_t received_checksum = 0;
+    for(i = 0; i<= data[0]+2; i++){
+        local_checksum ^=  data[i];
+    }
+    received_checksum = data[data[0]+3];
+    if(local_checksum == received_checksum){
+        return 1;
+    }else{
+        return 0;
+    }
+}
+
+void Split_Vector(uint8_t ready_frames_count){
+    uint8_t i = 0;
+    switch (ready_frames_count) {
+        case 1:
+            for(i = 0;i <= 25; i++){
+                frame_1[i] = update_Code_Buffer[i];
+            }
+            break;
+        case 2:
+            for(i = 0;i <= 25; i++){
+                frame_2[i] = update_Code_Buffer[i];
+            }
+            break;
+        case 3:
+            for(i = 0;i <= 25; i++){
+                frame_3[i] = update_Code_Buffer[i];
+            }
+            break;
+        case 4:
+            for(i = 0;i <= 25; i++){
+                frame_4[i] = update_Code_Buffer[i];
+            }
+            break;
+        case 5:
+            for(i = 0;i <= 25; i++){
+                frame_5[i] = update_Code_Buffer[i];
+            }
+            break;
+        default:
+            break;
+    }
+    for(i = 0;i <= 25; i++){
+        update_Code_Buffer[i] = 0;
+    }
+}
 
 int main(void)
 {
 
-	WDTCTL = WDTPW | WDTHOLD;	// stop watchdog timer
-	//PM5CTL0 &= ~LOCKLPM5;
-
-	P1_Init();                  //Habilita pines GPIO para el patron de acceso al bootloader
+    //Inicializacion basica del MSP
+    WDTCTL = WDTPW | WDTHOLD;
+    MSP430_Clk_Config();
+    eUSCIA0__UART_Init();       //Habilita comunicacion UART para conectar con la PC 
+    P1_Init();                  //Habilita pines GPIO para el patron de acceso al bootloader
     timer_Init();               //Habilita un timer para el patron de acceso al bootloader
     eUSCIA1_UART_Init();        //Habilita comunicacion UART para conectar con Flash
     eUSCIB0_SPI_init();         //Habilita comunicacion SPI para conectar con FRAM
+    LED_Init();                 //Habilita led indicador por cada frame recibida de PC
+    LED_TurnOn();
 
-    //P1OUT |= BIT0;
-    //P4DIR &= ~BIT2; //habilita pin P4.2 como entrada digital
-    //P4IES &= ~BIT2; //la bandera de interrupcion se activa con flanco positivo.
-    //P4IE |= BIT2;   //Activa la interrupci�n en P4.2
-
-    //RTC_disabling();
-    //RTC_setTime(0xA,0x00);
-    //RTC_setDate(0x9, 0xA, 0x7E5);
-    //RTC_setAlarm(0x01);
-    //RTC_enable();
-    //_low_power_mode_3();
-    //P1OUT &= ~BIT0;
-
-
-    //Comentario pablo
-//    int FRAM_dataW[892] = {     //Para escribir FRAM
-//uint8_t FRAM_REACO[892] = {      //Para escribir bootloader  //Subir el programa cacho por cacho pero en la direccion de donde lo sacaste y si prende el led ya chingaste
-//        // Offset 0x080001C0 to 0x0800053B
-//        0xD1, 0x04, 0x00, 0x08, 0x10, 0xB5, 0x05, 0x4C, 0x23, 0x78, 0x33, 0xB9,
-//        0x04, 0x4B, 0x13, 0xB1, 0x04, 0x48, 0xAF, 0xF3, 0x00, 0x80, 0x01, 0x23,
-//        0x23, 0x70, 0x10, 0xBD, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00,
-//        0x1C, 0x05, 0x00, 0x08, 0x08, 0xB5, 0x03, 0x4B, 0x1B, 0xB1, 0x03, 0x49,
-//        0x03, 0x48, 0xAF, 0xF3, 0x00, 0x80, 0x08, 0xBD, 0x00, 0x00, 0x00, 0x00,
-//        0x04, 0x00, 0x00, 0x20, 0x1C, 0x05, 0x00, 0x08, 0x80, 0xB4, 0x83, 0xB0,
-//        0x00, 0xAF, 0x78, 0x60, 0x0B, 0x46, 0xFB, 0x70, 0x13, 0x46, 0xBB, 0x70,
-//        0xBB, 0x78, 0x01, 0x2B, 0x0A, 0xD1, 0x7B, 0x68, 0x1A, 0x68, 0xFB, 0x78,
-//        0x5B, 0x00, 0x01, 0x21, 0x01, 0xFA, 0x03, 0xF3, 0x1A, 0x43, 0x7B, 0x68,
-//        0x1A, 0x60, 0x0A, 0xE0, 0x7B, 0x68, 0x1B, 0x68, 0xFA, 0x78, 0x52, 0x00,
-//        0x03, 0x21, 0x01, 0xFA, 0x02, 0xF2, 0xD2, 0x43, 0x1A, 0x40, 0x7B, 0x68,
-//        0x1A, 0x60, 0x00, 0xBF, 0x0C, 0x37, 0xBD, 0x46, 0x5D, 0xF8, 0x04, 0x7B,
-//        0x70, 0x47, 0x80, 0xB4, 0x83, 0xB0, 0x00, 0xAF, 0x78, 0x60, 0x0B, 0x46,
-//        0xFB, 0x70, 0x13, 0x46, 0xBB, 0x70, 0x7B, 0x68, 0x5B, 0x69, 0xFA, 0x78,
-//        0x01, 0x21, 0x01, 0xFA, 0x02, 0xF2, 0xD2, 0x43, 0x1A, 0x40, 0x7B, 0x68,
-//        0x5A, 0x61, 0x7B, 0x68, 0x5B, 0x69, 0xB9, 0x78, 0xFA, 0x78, 0x01, 0xFA,
-//        0x02, 0xF2, 0x1A, 0x43, 0x7B, 0x68, 0x5A, 0x61, 0x00, 0xBF, 0x0C, 0x37,
-//        0xBD, 0x46, 0x5D, 0xF8, 0x04, 0x7B, 0x70, 0x47, 0x80, 0xB4, 0x83, 0xB0,
-//        0x00, 0xAF, 0x78, 0x60, 0x0B, 0x46, 0xFB, 0x70, 0xFB, 0x78, 0x01, 0x2B,
-//        0x08, 0xD1, 0x7B, 0x68, 0x5B, 0x68, 0x1A, 0x68, 0x7B, 0x68, 0x5B, 0x68,
-//        0x42, 0xF0, 0x40, 0x02, 0x1A, 0x60, 0x07, 0xE0, 0x7B, 0x68, 0x5B, 0x68,
-//        0x1A, 0x68, 0x7B, 0x68, 0x5B, 0x68, 0x22, 0xF0, 0x40, 0x02, 0x1A, 0x60,
-//        0x00, 0xBF, 0x0C, 0x37, 0xBD, 0x46, 0x5D, 0xF8, 0x04, 0x7B, 0x70, 0x47,
-//        0x80, 0xB4, 0x85, 0xB0, 0x00, 0xAF, 0x78, 0x60, 0x7B, 0x68, 0x5B, 0x68,
-//        0x9B, 0x68, 0xDB, 0xB2, 0x03, 0xF0, 0x70, 0x03, 0xFB, 0x73, 0xFB, 0x7B,
-//        0x18, 0x46, 0x14, 0x37, 0xBD, 0x46, 0x5D, 0xF8, 0x04, 0x7B, 0x70, 0x47,
-//        0x80, 0xB5, 0x84, 0xB0, 0x00, 0xAF, 0x78, 0x60, 0x78, 0x68, 0xFF, 0xF7,
-//        0xE7, 0xFF, 0x03, 0x46, 0xBB, 0x73, 0x01, 0x23, 0xFB, 0x73, 0xBB, 0x7B,
-//        0x03, 0xF0, 0x20, 0x03, 0x00, 0x2B, 0x12, 0xD0, 0x7B, 0x68, 0x5B, 0x68,
-//        0x9B, 0x68, 0x7B, 0x68, 0x5B, 0x68, 0x1A, 0x68, 0x7B, 0x68, 0x5B, 0x68,
-//        0x42, 0xF4, 0x80, 0x72, 0x1A, 0x60, 0xBB, 0x7B, 0x03, 0xF0, 0x20, 0x03,
-//        0x00, 0x2B, 0x48, 0xD1, 0x00, 0x23, 0xFB, 0x73, 0x45, 0xE0, 0xBB, 0x7B,
-//        0x03, 0xF0, 0x40, 0x03, 0x00, 0x2B, 0x0D, 0xD0, 0x7B, 0x68, 0x5B, 0x68,
-//        0xDB, 0x68, 0x7B, 0x68, 0x5B, 0x68, 0x9B, 0x68, 0xBB, 0x7B, 0x03, 0xF0,
-//        0x40, 0x03, 0x00, 0x2B, 0x35, 0xD1, 0x00, 0x23, 0xFB, 0x73, 0x32, 0xE0,
-//        0xBB, 0x7B, 0x03, 0xF0, 0x10, 0x03, 0x00, 0x2B, 0x0F, 0xD0, 0x7B, 0x68,
-//        0x5B, 0x68, 0x9A, 0x68, 0x7B, 0x68, 0x5B, 0x68, 0x22, 0xF0, 0x10, 0x02,
-//        0x9A, 0x60, 0xBB, 0x7B, 0x03, 0xF0, 0x10, 0x03, 0x00, 0x2B, 0x20, 0xD1,
-//        0x00, 0x23, 0xFB, 0x73, 0x1D, 0xE0, 0xBB, 0x7B, 0x03, 0xF4, 0x80, 0x73,
-//        0x00, 0x2B, 0x16, 0xD0, 0x7B, 0x68, 0x5B, 0x68, 0x9B, 0x68, 0x7B, 0x68,
-//        0x5B, 0x68, 0x5B, 0x68, 0x03, 0xF0, 0x20, 0x03, 0x00, 0x2B, 0x04, 0xD0,
-//        0x00, 0x21, 0x78, 0x68, 0xFF, 0xF7, 0x70, 0xFF, 0x09, 0xE0, 0xBB, 0x7B,
-//        0x03, 0xF4, 0x80, 0x73, 0x00, 0x2B, 0x04, 0xD1, 0x00, 0x23, 0xFB, 0x73,
-//        0x01, 0xE0, 0x01, 0x23, 0xFB, 0x73, 0xFB, 0x7B, 0x18, 0x46, 0x10, 0x37,
-//        0xBD, 0x46, 0x80, 0xBD, 0x80, 0xB5, 0x00, 0xAF, 0x18, 0x4B, 0x1B, 0x68,
-//        0x17, 0x4A, 0x43, 0xF0, 0x01, 0x03, 0x13, 0x60, 0x01, 0x22, 0x05, 0x21,
-//        0x15, 0x48, 0xFF, 0xF7, 0x0B, 0xFF, 0x01, 0x22, 0x05, 0x21, 0x13, 0x48,
-//        0xFF, 0xF7, 0x2D, 0xFF, 0x12, 0x4B, 0x00, 0x22, 0x1A, 0x60, 0x04, 0xE0,
-//        0x10, 0x4B, 0x1B, 0x68, 0x01, 0x33, 0x0F, 0x4A, 0x13, 0x60, 0x0E, 0x4B,
-//        0x1B, 0x68, 0x0E, 0x4A, 0x93, 0x42, 0xF5, 0xDD, 0x00, 0x22, 0x05, 0x21,
-//        0x09, 0x48, 0xFF, 0xF7, 0x1A, 0xFF, 0x09, 0x4B, 0x00, 0x22, 0x1A, 0x60,
-//        0x04, 0xE0, 0x07, 0x4B, 0x1B, 0x68, 0x01, 0x33, 0x05, 0x4A, 0x13, 0x60,
-//        0x04, 0x4B, 0x1B, 0x68, 0x04, 0x4A, 0x93, 0x42, 0xF5, 0xDD, 0xD8, 0xE7,
-//        0x30, 0x38, 0x02, 0x40, 0x00, 0x00, 0x02, 0x40, 0x60, 0x00, 0x00, 0x20,
-//        0x7F, 0x38, 0x01, 0x00, 0x80, 0xB5, 0x00, 0xAF, 0x0A, 0x4B, 0x5B, 0x68,
-//        0x9B, 0x68, 0x03, 0xF0, 0x20, 0x03, 0x20, 0x2B, 0x06, 0xD1, 0x00, 0xBF,
-//        0x06, 0x48, 0xFF, 0xF7, 0x49, 0xFF, 0x03, 0x46, 0x00, 0x2B, 0xF9, 0xD1,
-//        0x03, 0x4B, 0x5B, 0x68, 0x9B, 0x68, 0x02, 0x4B, 0x5B, 0x68, 0x9B, 0x68,
-//        0x00, 0xBF, 0x80, 0xBD, 0x1C, 0x00, 0x00, 0x20, 0x0D, 0x48, 0x85, 0x46,
-//        0xAF, 0xF3, 0x00, 0x80, 0x0C, 0x48, 0x0D, 0x49, 0x0D, 0x4A, 0x00, 0x23,
-//        0x02, 0xE0, 0xD4, 0x58, 0xC4, 0x50, 0x04, 0x33, 0xC4, 0x18, 0x8C, 0x42,
-//        0xF9, 0xD3, 0x0A, 0x4A, 0x0A, 0x4C, 0x00, 0x23, 0x01, 0xE0, 0x13, 0x60,
-//        0x04, 0x32, 0xA2, 0x42, 0xFB, 0xD3, 0x00, 0xF0, 0x11, 0xF8, 0xFF, 0xF7,
-//        0x8F, 0xFF, 0xFE, 0xE7, 0x00, 0x00, 0x02, 0x20, 0x00, 0x00, 0x00, 0x20,
-//        0x00, 0x00, 0x00, 0x20, 0x3C, 0x05, 0x00, 0x08, 0x00, 0x00, 0x00, 0x20,
-//        0x64, 0x00, 0x00, 0x20, 0xFE, 0xE7, 0x00, 0x00, 0x70, 0xB5, 0x0D, 0x4D,
-//        0x0D, 0x4C, 0x64, 0x1B, 0xA4, 0x10, 0x00, 0x26, 0xA6, 0x42, 0x09, 0xD1,
-//        0x0B, 0x4D, 0x0C, 0x4C, 0x00, 0xF0, 0x18, 0xF8, 0x64, 0x1B, 0xA4, 0x10,
-//        0x00, 0x26, 0xA6, 0x42, 0x05, 0xD1, 0x70, 0xBD, 0x55, 0xF8, 0x04, 0x3B,
-//        0x98, 0x47, 0x01, 0x36, 0xEE, 0xE7, 0x55, 0xF8, 0x04, 0x3B, 0x98, 0x47,
-//        0x01, 0x36, 0xF2, 0xE7, 0x34, 0x05, 0x00, 0x08, 0x34, 0x05, 0x00, 0x08,
-//        0x34, 0x05, 0x00, 0x08, 0x38, 0x05, 0x00, 0x08, 0xF8, 0xB5, 0x00, 0xBF,
-//        0xF8, 0xBC, 0x08, 0xBC, 0x9E, 0x46, 0x70, 0x47, 0xF8, 0xB5, 0x00, 0xBF,
-//        0xF8, 0xBC, 0x08, 0xBC, 0x9E, 0x46, 0x70, 0x47, 0xE9, 0x01, 0x00, 0x08,
-//        0xC5, 0x01, 0x00, 0x08
-//    };
-
-
-
-    //masterReprogramationRutine(FRAM_startAddress,Flash_startAddress);
-    
-    
-    //ACK = BootloaderAccess();           //Solo se puede guardar hasta 256 bytes en el bootloader antes de que mande error el MSP
-    //eeraseCommand(11);//stmf407 080e
-    //Ultimo sector de flash de la stmf407 = 11 = 0x080E0000
-    //ultimo sector de flash de la f466 = 7 = 0x08060000
-    
-    
-    //eeraseCommand(7); // FRAM_REACO, FRAM_RdataSize  //Se puede enviar por cachos con la funcion del bootloader
-
-
-
-    //goCommand(0x0800, 0x0000);
-//uint8_t FRAM_test_Buff[4]={0x10,0x90,0x34,0x78};      //Afuerzas se tiene que leer en formato de 16 bits pq no se llena la fifo del SPI con 8
-uint16_t FRAM_test_Buff[50]={0};
-//FRAM_read(0x00,0x08,0x00,FRAM_test_Buff,4);
-
-
-
-//FRAM_REPROG(Program_StoreAdd);
-//FRAM_erase(0x00,0x04,0x58,36);
-//FRAM_write(0x00,0x08,0x05,&data_chk,1);
-//FRAM_read(0x00,0x00,0x00,FRAM_test_Buff,36);
-
-masterReprogramationRutine(0x00000000, 0x08060000, 4);
-//ACK= BootloaderAccess();
-//eeraseCommand(7);
-//writeMemoryCommand(0x0806,0x0000,FRAM_test_Buff,4);
-
-goCommand(0x0800, 0x0000);
+    /* Rutina de reprogramacion en main
+    * verifica si se inicio una transmision de PC
+    * verifica si el frame recibido ya esta guardado en el buffer global
+    * verifica la integridad de los datos recibidos con el checksum
+    * en caso de corrupcion de datos manda NACK
+    * caso contrario reprograma la FRAM con la frame recibida
+    * cuando todos los frames esten guardados en FRAM inicia la reprogramacion del UC maestro
+    */
     while(1){
-	}
+        if(update_Code_enable == 1){        
+            if(update_Code_frame_ready == 1){
+                if(Frame_Verify_Checksum(update_Code_Buffer) == 1){
+                    ready_frames_count++;
+                    //Split_Vector(ready_frames_count);
+
+                    //Almacenar programa recibido en FRAM
+                    FRAM_REPROG(update_Code_Buffer);
+                    //Se vacia el buffer global para actualizar al siguiente frame
+                    for(i = 0;i <= 25; i++){
+                            update_Code_Buffer[i] = 0;
+                        }
+                    if (ready_frames_count == 4){       //Aqui se puede cambiar de bandera para reprogramar el UC maestro con otro evento
+                        //Asi debe estar para reprogramar en la direccion indicada por el hexfile
+                        //masterReprogramationRutine(0x00000000,Each_Frame_address[0],ready_frames_count); //<------------------------------
+                        masterReprogramationRutine(0x00000000,0x08060000,ready_frames_count);  
+                    }
+
+                    eUSCIA0_UART_send(ACK_BYTE);
+                }else{
+                    eUSCIA0_UART_send(NACK_BYTE);
+                }
+                LED_Toggle();
+                update_Code_frame_ready = 0;
+            }
+        }else{
+            //Reset de las variables de control y apuntadores
+            ready_frames_count = 0;
+            FRAM_WRT_PTR = 0x0000;
+        }
+    }
+
+    return 0;
 }
+
+/*Rutina de interrupcion
+* Habilita la reprogramacion en la rutina main a travez de una bandera
+* en el momento que se recibe el byte de inicio
+* Guarda los frames recibidos byte por byte en el buffer global
+* y la deshabilita la reprog en el momento que se recibe el byte de fin 
+*/
+#pragma vector = USCI_A0_VECTOR
+__interrupt void USCI_A0_ISR(void){
+    UCA0IFG = 0;
+    update_Code_frame_ready = 0;
+    uint8_t start_byte_received = 0;
+
+    if(update_Code_first_Byte == 1){ //�Es una nueva trama?
+        start_byte_received = UCA0RXBUF;
+        if(start_byte_received == START_BYTE){
+           update_Code_first_Byte = 0;
+           P1OUT ^= BIT0;
+           UCA0TXBUF = ACK_BYTE; //Dato a enviar (pag.791) manual slau367p.pdf
+           update_Code_enable = 1; //Habilita programacion
+        }else if(start_byte_received == END_BYTE){
+           update_Code_first_Byte = 1;
+           UCA0TXBUF = ACK_BYTE;
+           update_Code_enable = 0; //Deshabilita reprogramaci�n
+        }else{//Si el primer byte no es el byte de inicio o el byte de fin, entonces es un dato.
+            update_Code_first_Byte = 0;
+            update_Code_Buffer[update_Code_Byte_Count] = start_byte_received;
+            update_Code_Byte_Count++;
+        }
+    }else{
+        update_Code_Buffer[update_Code_Byte_Count] = UCA0RXBUF;
+        update_Code_Byte_Count++;
+        if(update_Code_Byte_Count == 4 + update_Code_Buffer[0]){
+            update_Code_Byte_Count = 0;
+            update_Code_frame_ready = 1;
+            update_Code_first_Byte = 1;
+        }
+    }
+}
+
+
+
+
+
 
 
 
@@ -257,7 +382,4 @@ goCommand(0x0800, 0x0000);
 __interrupt void PORT4_ISR(void){
     P4IFG = 0; //limpia bandera de interrupcion
     P1OUT ^= BIT0;
-    _low_power_mode_off_on_exit();
 }
-
-

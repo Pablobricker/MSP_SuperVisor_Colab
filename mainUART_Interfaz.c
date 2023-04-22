@@ -99,3 +99,9 @@ int main(void){
         }
     }
 }
+
+main(){
+    while(StartByte=eUSCIA0_UART_receive();){
+        //Inicia reprogramacion
+    }
+}

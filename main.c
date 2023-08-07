@@ -1,10 +1,14 @@
+#include <FRAM_commands.h>
+#include "eUSCIB0_SPI.h"
 #include <msp430.h>
 #include <stdint.h>
-#include "eUSCIA1_UART.h"
+#include <stdbool.h>
 #include "STMF407xx_bootloaderCommands.h"
-#include "eUSCIB0_SPI.h"
+#include "eUSCIA1_UART.h"
+#include "eUSCIA0_UART.h"
 #include "TIMERA0.h"
-#include "FRAM_commands.h"
+#include "LED.h"
+#include <stdbool.h>
 
 /*
  * Recibe un archivo .hex completo,
@@ -36,6 +40,41 @@
  * dato[4+data[0]] - dato n (checksum)
  * */
 
+//
+
+bool data_Frame = false; //0
+bool end_Of_File = false; //1
+bool extended_Segment_Adress_Frame = false; //2
+bool start_Segment_Adress_Frame = false; //3
+bool extended_Linear_Address_Frame = false; //4
+bool start_Linear_Address_Frame = false; //5
+bool CRC_Frame = false; //6
+bool master_NumBytes_Frame = false; //7
+bool master_NumFrames_Frame = false; //8
+
+//Variables de interes para pablo
+//uint16_t Master_Program_Num_Bytes_MSB = 0;
+//uint16_t Master_Program_Num_Bytes_LSB = 0;
+//uint16_t Master_Program_CRC_MSB = 0;
+//uint16_t Master_Program_CRC_LSB = 0;
+
+uint8_t master_Program_CRC[] = {0,0,0,0};       //Arreglo de bytes que almacenan el crc del programa en FRAM
+uint8_t master_Program_CRC_Checksum_Local = 0;  //Checksum aux
+uint8_t master_Program_CRC_Checksum_Received = 0;//Checksum aux
+uint8_t master_Program_Num_Bytes[] = {1,2,3,4}; //Arreglo de bytes que almacenan el numero total de bytes del programa en FRAM
+uint8_t master_Program_Num_Bytes_Checksum_Local = 0;//Checksum aux
+uint8_t master_Program_Num_Bytes_Checksum_Received = 0;//Checksum aux
+uint8_t master_Program_NumFrames[] = {0,0,0,0};
+uint8_t master_NumFrames_Checksum_Received = 0;
+uint8_t master_NumFrames_Checksum_Local = 0;
+uint8_t response = 0;
+
+
+uint8_t masterMemoryCorrupted = 0;
+uint8_t interrupt_timer_Counter = 0;
+uint8_t first_time = 1;
+#define NUM_FRAMES_MASTER_CODE 852
+
 #define SIZE_BUFFER 100             //Tamaño maximo de un buffer de datos por cada trama
 //Bytes recibidos de PC mediante interrupciones de UART
 #define START_BYTE 0xF              //Byte para empezar la reporgramacion
@@ -44,23 +83,25 @@
 #define ACK_BYTE 0x79               //Byte ACK para comunicacion MSP-->maestro
 #define NACK_BYTE 0x7F              //Byte NACK para comunicacion con el maestro
 
-uint8_t update_Code_Buffer[SIZE_BUFFER];    //Buffer Global de datos recibidos de PC
+uint8_t update_Code_Buffer[SIZE_BUFFER] = {0};    //Buffer Global de datos recibidos de PC
 uint8_t update_Code_Byte_Count = 0;         //Indice de bytes para el llenado del buffer global
 uint8_t update_Code_first_Byte = 1;         //
+uint8_t update_Code_end_Byte = 0;           //Indica que la terminal completo la carga del software a la FRAM
 uint8_t update_Code_enable = 0;             //Indica en la rutina main que se han empezado a recibir datos para reprogramacion
 uint8_t update_Code_frame_ready = 0;        //Indica si un frame de datos termino de recibirse 
 
+//LAS LIMITACIONES DEL MSP MAS QUE RENDIMIENTO ES DE EL TAMAÑO DEL BUS DE DATOS PARA MANEJAR UN MAYOR NUMERO DE BYTES SEGUN EL PROGRAMA XDz
 uint16_t FRAM_WRT_PTR = 0x0000;             //Puntero global movil para la escritura en FRAM
-uint16_t StartFRAM_ProgramAddress = 0x0000; //Puntero de la primera localidad en FRAM para lectura del programa
-uint8_t ready_frames_count = 0;             //Conteo de las tramas recibidas de PC
+uint16_t StartFRAM_ProgramAddress = 0x0000; //Puntero de la primera localidad en FRAM para lectura del program
+#define StartFlash_ProgramAddress 0x0000 //0x08060000 Sector 6 (configurable) dividir la direccion
+#define Flash_Begin 0x0800
+                                            //Apuntador truncado a 16 bits
+                                            //Eso dice que solo podemos escribir 64 kbytes de memoria en flash
+                                            //Sector 0 al 3
+uint16_t ready_frames_count = 0;             //Conteo de las tramas recibidas de PC
                                             //Sirve para saber cuando parar de leer el programa almacenado en FRAM
-
-uint8_t frame_1[25] = {0};
-uint8_t frame_2[25] = {0};
-uint8_t frame_3[25] = {0};
-uint8_t frame_4[25] = {0};
-uint8_t frame_5[25] = {0};
-
+                                            //66535 frames
+                                            //total de 2 MBytes
 uint16_t Each_Frame_address[50]={};     //Buffer global para el manejo del offset de direccion para el guardado en FLASH
                                         //Truncado a 50 frames recibidas
 
@@ -73,7 +114,7 @@ uint16_t FRAM_tstBuff[25] = {0};        //Variable de pruenba (omitir)
 
 void FRAM_REPROG(uint8_t* Global_Buffer){
 
-
+if(Global_Buffer == update_Code_Buffer){
 /* Estructura de datos recibidos de PC
  * Numero de datos [1 byte]
  * OFFSET para FLASH [2 bytes]
@@ -99,7 +140,7 @@ void FRAM_REPROG(uint8_t* Global_Buffer){
 
     //Conversion del tipo de dato para escritura en FRAM
     
-    int MSP2FRAMvB[25]; //Buffer local de datos para escritura en FRAM 
+    int MSP2FRAMvB[100]; //Buffer local de datos para escritura en FRAM
                         //La longitud inicial del buffer debe ser mayor al numero de datos
                         //Ya con eso no hay pdos
     int j;
@@ -114,12 +155,43 @@ void FRAM_REPROG(uint8_t* Global_Buffer){
     *datos
     *checksum de datos calculado
     */
+    /*
     FRAM_write((FRAM_WRT_PTR>>16)&0xFF,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,&nByt,1);
     FRAM_WRT_PTR++;
     FRAM_write((FRAM_WRT_PTR>>16)&0xFF,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,MSP2FRAMvB,nByt);
     FRAM_WRT_PTR=FRAM_WRT_PTR +nByt;
     FRAM_write((FRAM_WRT_PTR>>16)&0xFF,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,&data_chksum,1);
     FRAM_WRT_PTR++;
+    */
+
+    if(ready_frames_count == 1){
+        FRAM_WRT_PTR = 0x0C;
+    }
+    FRAM_write(0x00,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,&nByt,1);
+    FRAM_WRT_PTR++;
+    FRAM_write(0x00,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,MSP2FRAMvB,nByt);
+    FRAM_WRT_PTR=FRAM_WRT_PTR +nByt;
+    FRAM_write(0x00,(FRAM_WRT_PTR>>8)&0xFF,FRAM_WRT_PTR&0xFF,&data_chksum,1);
+    FRAM_WRT_PTR++;
+
+
+}
+else{
+    unsigned int k;
+    int master_Program[4]={0};
+    for(k=0;k<4;k++){
+        master_Program[k]= *(Global_Buffer+k);
+    }
+    if(Global_Buffer == master_Program_CRC){
+        FRAM_write(0x00,0x00,0x00,master_Program,4);
+    }
+    if(Global_Buffer == master_Program_Num_Bytes){
+            FRAM_write(0x00,0x00,0x04,master_Program,4);
+        }
+    if (Global_Buffer == master_Program_NumFrames){
+        FRAM_write(0x00,0x00,0x08,master_Program,4);
+    }
+}
 }
 
 void eUSCIA0_UART_send(int data_Tx){
@@ -137,31 +209,33 @@ void eUSCIA0_UART_send(int data_Tx){
 //param Rx_ready_buffers numero de frames almacenados en FRAM para un programa completo (inicia en 0x0 en un reset)
 
 void masterReprogramationRutine(uint32_t FRAM_initialAddress, uint32_t Flash_initialAddress1, int Rx_ready_buffers){
-    uint32_t FRAM_actualAddress = FRAM_initialAddress;
+    uint32_t FRAM_actualAddress = FRAM_initialAddress+12;
     uint32_t Flash_actualAddress = Flash_initialAddress1;
 
     //Esta funcion asume que el respaldo del programa del master ya ha sido cargado en la FRAM.
 
-    uint16_t FRAM2MSP_VB[25]; //Vector de Buffer de FRAM ---> MSP
-    uint8_t MSP2Master_VB[25];//Vector de Buffer de MSP ---> Master
+    uint16_t FRAM2MSP_VB[100]={0}; //Vector de Buffer de FRAM ---> MSP
+    uint8_t MSP2Master_VB_CHK[100];//Vector de Buffer de MSP ---> Master
                                 //Truncados a 25 bytes
+    uint32_t MSP2Master_VB[100]={0};//Vector de Buffer de MSP ---> Master
 
     //int FRAMvectorBufferSize = sizeof(FRAMvectorBuffer)/sizeof(FRAMvectorBuffer[0]);
     unsigned int i;
+    timer_Stop();
+    eUSCIA1_UART_Init_Master_Reprog();
 
-    
-    ACK= BootloaderAccess();
-    eeraseCommand(7);       //Region de Flash para hacer pruebas (sector 7 0x08060000) en la nucleo F446RE
+    uint8_t ACK= BootloaderAccess();
+    eeraseCommand(0);       //Region de Flash para hacer pruebas (sector 7 0x08060000) en la nucleo F446RE
 
     for (i=0; i<Rx_ready_buffers; i++){
         //Lectura de frames almacenados en FRAM
-
-        uint16_t BFFSZ_HX;  //Numero datos formato 16-bit
-            FRAM_read(((FRAM_actualAddress)>>16)&0xFF,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress&0xFF,&BFFSZ_HX, 1);
-            FRAM_actualAddress++;
+        LED_Toggle();
+        uint16_t BFFSZ_HX=0;  //Numero datos formato 16-bit
+            FRAM_read(0x00,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress&0xFF,&BFFSZ_HX, 1);
+            //FRAM_actualAddress++;
             int BufferVectorSize = (int) BFFSZ_HX;  //Numero de datos formato int
 
-        FRAM_read(((FRAM_actualAddress)>>16)&0xFF,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress & 0xFF, FRAM2MSP_VB, BufferVectorSize);
+        FRAM_read(0x00,((FRAM_actualAddress)>>8)&0xFF, FRAM_actualAddress & 0xFF, FRAM2MSP_VB, BufferVectorSize+2);
         //Ejecutar alguna rutina para verificar la integridad de los datos (No se tiene que desarrollar ahora).
         //Hacer la conversion de 16 a 8 bits para que se puedan enviar bien los datos
         //Para mas optimizazion modificar las funciones de escritura y lectura de la FRAM a 8 bits
@@ -169,15 +243,21 @@ void masterReprogramationRutine(uint32_t FRAM_initialAddress, uint32_t Flash_ini
 
         //Conversion de formato para compatibilidad con el UART del maestro 16-->8-bit
         unsigned int j;
-        for (j=0; j<=BufferVectorSize; j++){
-            MSP2Master_VB[j] = FRAM2MSP_VB[j]&0xFF;}
-
-        //Escritura UART hacia la Flash
-        writeMemoryCommand(((Flash_actualAddress)>>16)&0xFFFF,(Flash_actualAddress)&0xFFFF , MSP2Master_VB, BufferVectorSize);
-        FRAM_actualAddress = FRAM_actualAddress + BufferVectorSize+1;       //El +1 es para saltar el checksum
+        for (j=0; j<=BufferVectorSize+2; j++){
+                    MSP2Master_VB_CHK[j] = FRAM2MSP_VB[j]&0xFF;}
+        if (Frame_Verify_Checksum(MSP2Master_VB_CHK,false) == 1){
+            for (j=0; j<=BufferVectorSize; j++){
+                        MSP2Master_VB[j] = MSP2Master_VB_CHK[j+1];}
+            //Escritura UART hacia la Flash
+        writeMemoryCommand(0x0800,(Flash_actualAddress)&0xFFFF , MSP2Master_VB, BufferVectorSize);
+        FRAM_actualAddress = FRAM_actualAddress + BufferVectorSize+2;       //El +2 es para saltar el checksum y el numero de datos
         Flash_actualAddress = Flash_actualAddress + BufferVectorSize;
+        }
+        else {i=i-1;}
     }
-
+    goCommand(0x0800,0x0000);
+    eUSCIA1_UART_Init_MasterFunctionalStatus_Determination();
+    //timer_Enable();
 }
 
 void MSP430_Clk_Config(){
@@ -188,48 +268,23 @@ void MSP430_Clk_Config(){
     CSCTL0_H = 0;
 }
 
-void eUSCIA0__UART_Init(){
-    UCA0CTLW0 |= UCSWRST;
-    UCA0CTLW0 |= UCSSEL__SMCLK;
-    UCA0BRW |= 6;
-    UCA0MCTLW |= 0x20<<8 | UCOS16 | 8<<4;
 
-    P2SEL0 &= ~(BIT0 | BIT1);                   //P2SEL0.x = 0
-    P2SEL1 |= BIT0 | BIT1;                      //P2SEL1.x = 1; Selecciona la funci�n de UART en P2.1 y P2.0
-    PM5CTL0 &= ~LOCKLPM5;
-
-    UCA0CTLW0 &= ~UCSWRST;
-
-    UCA0IE |= UCRXIE;                           //Habilita interrupci�n de recepci�n
-                      //Habilita la las interrupciones enmascarables
-    UCA0IFG &= ~UCRXIFG;
-    _enable_interrupt();
-}
-
-void LED_Init(){
-    P1DIR |= BIT0;
-}
-
-void LED_TurnOn(){
-    P1OUT |= BIT0;
-}
-
-void LED_TurnOff(){
-    P1OUT &= ~BIT0;
-}
-
-void LED_Toggle(){
-    P1OUT ^= BIT0;
-}
-
-uint8_t Frame_Verify_Checksum(uint8_t data[]){
+uint8_t Frame_Verify_Checksum(uint8_t data[], bool in_nout){
     uint8_t i = 0;
     uint8_t local_checksum = 0;
     uint8_t received_checksum = 0;
+    if(in_nout){
     for(i = 0; i<= data[0]+2; i++){
         local_checksum ^=  data[i];
     }
     received_checksum = data[data[0]+3];
+    }
+    else{
+        for(i = 0; i<= data[0]; i++){//Asi si toma en cuenta el numero de datos para el calculo del checksum
+                local_checksum ^=  data[i];
+            }
+            received_checksum = data[data[0]+1];
+    }
     if(local_checksum == received_checksum){
         return 1;
     }else{
@@ -237,56 +292,126 @@ uint8_t Frame_Verify_Checksum(uint8_t data[]){
     }
 }
 
-void Split_Vector(uint8_t ready_frames_count){
-    uint8_t i = 0;
-    switch (ready_frames_count) {
-        case 1:
-            for(i = 0;i <= 25; i++){
-                frame_1[i] = update_Code_Buffer[i];
+void monitoring_MasterCode_Update_Request(void){
+    uint16_t i = 0;
+    if(update_Code_enable == 1){
+        if(update_Code_frame_ready == 1){
+            if(Frame_Verify_Checksum(update_Code_Buffer,true) == 1){
+                ready_frames_count++; //Variable que tiene la cuenta del programa
+                //Split_Vector(ready_frames_count);
+
+                //Almacenar programa recibido en FRAM
+                FRAM_REPROG(update_Code_Buffer);
+                //Se vacia el buffer global para actualizar al siguiente frame
+                for(i = 0;i <= 33; i++){
+                        update_Code_Buffer[i] = 0;
+                    }
+               /* if (ready_frames_count == 4){       //Aqui se puede cambiar de bandera para reprogramar el UC maestro con otro evento
+                    //Asi debe estar para reprogramar en la direccion indicada por el hexfile
+                    //masterReprogramationRutine(0x00000000,Each_Frame_address[0],ready_frames_count); //<------------------------------
+                    masterReprogramationRutine(0x00000000,StartFlash_ProgramAddress,ready_frames_count);
+                }*/
+
+                eUSCIA0_UART_send(ACK_BYTE);
+            }else{
+                eUSCIA0_UART_send(NACK_BYTE);
             }
-            break;
-        case 2:
-            for(i = 0;i <= 25; i++){
-                frame_2[i] = update_Code_Buffer[i];
+            LED_Toggle();
+            update_Code_frame_ready = 0;
+        }
+    }else{
+        //Reset de las variables de control y apuntadores
+        if(ready_frames_count > 0){
+            if(update_Code_end_Byte==1){
+                FRAM_REPROG(master_Program_CRC);
+                FRAM_REPROG(master_Program_Num_Bytes);
+                FRAM_REPROG(master_Program_NumFrames);
+                masterReprogramationRutine(0x0000,StartFlash_ProgramAddress,ready_frames_count);
             }
-            break;
-        case 3:
-            for(i = 0;i <= 25; i++){
-                frame_3[i] = update_Code_Buffer[i];
-            }
-            break;
-        case 4:
-            for(i = 0;i <= 25; i++){
-                frame_4[i] = update_Code_Buffer[i];
-            }
-            break;
-        case 5:
-            for(i = 0;i <= 25; i++){
-                frame_5[i] = update_Code_Buffer[i];
-            }
-            break;
-        default:
-            break;
-    }
-    for(i = 0;i <= 25; i++){
-        update_Code_Buffer[i] = 0;
+        }
+        ready_frames_count = 0;
+        FRAM_WRT_PTR = 0x0000;
     }
 }
 
-int main(void)
-{
+void monitoting_Master_Functional_Status(){
+    if (masterMemoryCorrupted == 1 && update_Code_enable == 0){
+        //Reconfigura UART
+        //eUSCIA1_UART_Init_MasterFunctionalStatus_Determination();
+        //Reprograma
+        timer_Stop();
+        ready_frames_count = NUM_FRAMES_MASTER_CODE;
+        masterReprogramationRutine(0x0000,StartFlash_ProgramAddress,ready_frames_count);
+        //goCommand(0x0800,0x0000);
+        masterMemoryCorrupted = 0;
+        _delay_cycles(50000);
+        _delay_cycles(50000);
+        //UCA1TXBUF = 0xFF;
+        //timer_Enable();
+    }
+}
 
+bool monitoring_Function_Init(){
+    bool initialization_Ok = false;
+    uint8_t i = 0;
+    uint8_t error = 0;
+
+    master_Program_Num_Bytes_Checksum_Local = master_Program_Num_Bytes[3] ^ master_Program_Num_Bytes[2] ^ master_Program_Num_Bytes[1] ^ master_Program_Num_Bytes[0];
+
+    eUSCIA1_UART_send(0xFF);
+    __delay_cycles(20000);
+    response = UCA1RXBUF;
+    if (response == ACK_BYTE) {
+        for (i = 0; i < 4; i++) {
+            eUSCIA1_UART_send(master_Program_Num_Bytes[i]);
+        }
+        eUSCIA1_UART_send(master_Program_Num_Bytes_Checksum_Local);
+        __delay_cycles(20000);
+        response = UCA1RXBUF;
+        if (response) {
+            eUSCIA1_UART_send(0xFF);
+            __delay_cycles(10000);
+            response = UCA1RXBUF;
+            timer_Enable();
+            if (response == ACK_BYTE) {
+                initialization_Ok = true;
+
+            }else {
+                error++;
+            }
+        }else{
+            error++;
+        }
+    }else{
+        error++;
+    }
+
+    return initialization_Ok;
+}
+
+int main(void)
+
+{
+    uint8_t response = 0;
+    uint32_t data_To_Write[] = {12,11,10,9,8,7,6,5,4,3,2,1,0};
+    int size = (sizeof(data_To_Write))/(sizeof(data_To_Write[0]));
     //Inicializacion basica del MSP
     WDTCTL = WDTPW | WDTHOLD;
-    MSP430_Clk_Config();
+    //MSP430_Clk_Config();
     eUSCIA0__UART_Init();       //Habilita comunicacion UART para conectar con la PC 
     P1_Init();                  //Habilita pines GPIO para el patron de acceso al bootloader
-    timer_Init();               //Habilita un timer para el patron de acceso al bootloader
-    eUSCIA1_UART_Init();        //Habilita comunicacion UART para conectar con Flash
+    eUSCIA1_UART_Init_MasterFunctionalStatus_Determination();        //Habilita comunicacion UART para conectar con Flash
     eUSCIB0_SPI_init();         //Habilita comunicacion SPI para conectar con FRAM
     LED_Init();                 //Habilita led indicador por cada frame recibida de PC
     LED_TurnOn();
+    timer_Init();
+    timer_setPeriod(2);
+    //timer_Enable();
+    //Tiene que dar un disparo al watchdog
+    //Enviar dato por UARTA1
+    //UCA1TXBUF = 0xFF;
 
+    //monitoring_Function_Init();
     /* Rutina de reprogramacion en main
     * verifica si se inicio una transmision de PC
     * verifica si el frame recibido ya esta guardado en el buffer global
@@ -295,37 +420,19 @@ int main(void)
     * caso contrario reprograma la FRAM con la frame recibida
     * cuando todos los frames esten guardados en FRAM inicia la reprogramacion del UC maestro
     */
+    //response = BootloaderAccess();
+    //eeraseCommand(0);
+    //writeMemoryCommand(0x0800, 0x0000, data_To_Write, size);
+    //if(response == ACK_BYTE) LED_TurnOn();
+    //goCommand(0x0800, 0x0000);
+
+    //ready_frames_count = NUM_FRAMES_MASTER_CODE;
+    //masterReprogramationRutine(0x0000,StartFlash_ProgramAddress,ready_frames_count);
+    //goCommand(0x0800,0x0000);
+
     while(1){
-        if(update_Code_enable == 1){        
-            if(update_Code_frame_ready == 1){
-                if(Frame_Verify_Checksum(update_Code_Buffer) == 1){
-                    ready_frames_count++;
-                    //Split_Vector(ready_frames_count);
-
-                    //Almacenar programa recibido en FRAM
-                    FRAM_REPROG(update_Code_Buffer);
-                    //Se vacia el buffer global para actualizar al siguiente frame
-                    for(i = 0;i <= 25; i++){
-                            update_Code_Buffer[i] = 0;
-                        }
-                    if (ready_frames_count == 4){       //Aqui se puede cambiar de bandera para reprogramar el UC maestro con otro evento
-                        //Asi debe estar para reprogramar en la direccion indicada por el hexfile
-                        //masterReprogramationRutine(0x00000000,Each_Frame_address[0],ready_frames_count); //<------------------------------
-                        masterReprogramationRutine(0x00000000,0x08060000,ready_frames_count);  
-                    }
-
-                    eUSCIA0_UART_send(ACK_BYTE);
-                }else{
-                    eUSCIA0_UART_send(NACK_BYTE);
-                }
-                LED_Toggle();
-                update_Code_frame_ready = 0;
-            }
-        }else{
-            //Reset de las variables de control y apuntadores
-            ready_frames_count = 0;
-            FRAM_WRT_PTR = 0x0000;
-        }
+        monitoring_MasterCode_Update_Request();
+        monitoting_Master_Functional_Status();
     }
 
     return 0;
@@ -343,47 +450,119 @@ __interrupt void USCI_A0_ISR(void){
     update_Code_frame_ready = 0;
     uint8_t start_byte_received = 0;
 
-    if(update_Code_first_Byte == 1){ //�Es una nueva trama?
+    if(update_Code_first_Byte == 1){ //Es una nueva trama?
         start_byte_received = UCA0RXBUF;
         if(start_byte_received == START_BYTE){
-           update_Code_first_Byte = 0;
+           update_Code_first_Byte = 1;
            P1OUT ^= BIT0;
            UCA0TXBUF = ACK_BYTE; //Dato a enviar (pag.791) manual slau367p.pdf
            update_Code_enable = 1; //Habilita programacion
         }else if(start_byte_received == END_BYTE){
            update_Code_first_Byte = 1;
            UCA0TXBUF = ACK_BYTE;
-           update_Code_enable = 0; //Deshabilita reprogramaci�n
-        }else{//Si el primer byte no es el byte de inicio o el byte de fin, entonces es un dato.
+           update_Code_enable = 0; //Deshabilita reprogramacion
+           update_Code_end_Byte = 1;
+        }else if(start_byte_received == 0x00){//Si el primer byte no es el byte de inicio o el byte de fin, entonces es un dato.
             update_Code_first_Byte = 0;
-            update_Code_Buffer[update_Code_Byte_Count] = start_byte_received;
-            update_Code_Byte_Count++;
+            data_Frame = true;
+            ///update_Code_Buffer[update_Code_Byte_Count] = start_byte_received;
+            //update_Code_Byte_Count++;
+        }else if(start_byte_received == 0x06){
+            //CRC frame
+            update_Code_first_Byte = 0;
+            CRC_Frame = true;
+        }else if(start_byte_received == 0x07){
+            //master num bytes frame
+            master_NumBytes_Frame = true;
+            update_Code_first_Byte = 0;
+        }else if(start_byte_received == 0x08){
+            //master num frames frame
+            master_NumFrames_Frame = true;
+            update_Code_first_Byte = 0;
         }
     }else{
-        update_Code_Buffer[update_Code_Byte_Count] = UCA0RXBUF;
-        update_Code_Byte_Count++;
-        if(update_Code_Byte_Count == 4 + update_Code_Buffer[0]){
-            update_Code_Byte_Count = 0;
-            update_Code_frame_ready = 1;
-            update_Code_first_Byte = 1;
+        if (data_Frame == true) {
+            update_Code_Buffer[update_Code_Byte_Count] = UCA0RXBUF; //Termina de llenar el buffer con los demas datos de la trama
+            update_Code_Byte_Count++;
+            if(update_Code_Byte_Count == 4 + update_Code_Buffer[0]){
+                update_Code_Byte_Count = 0;
+                update_Code_frame_ready = 1;
+                update_Code_first_Byte = 1;
+                data_Frame = false;
+            }
+        }else if (CRC_Frame == true){
+            if(update_Code_Byte_Count == 4){
+                //Se recibe checksum
+                master_Program_CRC_Checksum_Local = master_Program_CRC[3] ^ master_Program_CRC[2] ^ master_Program_CRC[1] ^ master_Program_CRC[0];
+                uint8_t master_Program_CRC_Checksum_Received = UCA0RXBUF;
+                if(master_Program_CRC_Checksum_Received == master_Program_CRC_Checksum_Local){
+                    UCA0TXBUF = 0x69;
+                }else{
+                    UCA0TXBUF = NACK_BYTE;
+                }
+                update_Code_Byte_Count = 0;
+                update_Code_first_Byte = 1;
+                CRC_Frame = false;
+            }else{
+                master_Program_CRC[update_Code_Byte_Count] = UCA0RXBUF;
+                update_Code_Byte_Count++;
+            }
+        }else if (master_NumBytes_Frame == true){
+            if(update_Code_Byte_Count == 4){
+                //Se recibe checksum
+                master_Program_Num_Bytes_Checksum_Local = master_Program_Num_Bytes[3] ^ master_Program_Num_Bytes[2] ^ master_Program_Num_Bytes[1] ^ master_Program_Num_Bytes[0];
+                uint8_t master_Program_Num_Bytes_Checksum_Received = UCA0RXBUF;
+                if(master_Program_Num_Bytes_Checksum_Received == master_Program_Num_Bytes_Checksum_Local){
+                    UCA0TXBUF = 0x69;
+                }else{
+                    UCA0TXBUF = NACK_BYTE;
+                }
+                update_Code_Byte_Count = 0;
+                update_Code_first_Byte = 1;
+                master_NumBytes_Frame = false;
+            }else{
+                master_Program_Num_Bytes[update_Code_Byte_Count] = UCA0RXBUF;
+                update_Code_Byte_Count++;
+            }
+        }else if (master_NumFrames_Frame == true) {
+            if(update_Code_Byte_Count == 4){
+                //Se recibe checksum
+                master_NumFrames_Checksum_Local = master_Program_NumFrames[3] ^ master_Program_NumFrames[2] ^ master_Program_NumFrames[1] ^ master_Program_NumFrames[0];
+                uint8_t master_NumFrames_Checksum_Received = UCA0RXBUF;
+                if(master_NumFrames_Checksum_Received == master_NumFrames_Checksum_Local){
+                    UCA0TXBUF = 0x77;
+                }else{
+                    UCA0TXBUF = NACK_BYTE;
+                }
+                update_Code_Byte_Count = 0;
+                update_Code_first_Byte = 1;
+                master_NumFrames_Frame = false;
+            }else{
+                master_Program_NumFrames[update_Code_Byte_Count] = UCA0RXBUF;
+                update_Code_Byte_Count++;
+            }
         }
     }
 }
 
-
-
-
-
-
-
-
+// Timer0_A0 interrupt service routine
+#if defined(__TI_COMPILER_VERSION__) || defined(__IAR_SYSTEMS_ICC__)
+#pragma vector = TIMER0_A0_VECTOR
+__interrupt void Timer0_A0_ISR (void)
+#elif defined(__GNUC__)
+void __attribute__ ((interrupt(TIMER0_A0_VECTOR))) Timer0_A0_ISR (void)
+#else
+#error Compiler not supported!
+#endif
+{
+  //Limpiar bandera de interrupcion
+  masterMemoryCorrupted = 1; //Si se ejecuta la subrutina del timer quiere decir que la memoria se ha corrupto
+  P1OUT ^= BIT0;
+  interrupt_timer_Counter++;
+}
 
 #pragma vector = PORT4_VECTOR
 __interrupt void PORT4_ISR(void){
     P4IFG = 0; //limpia bandera de interrupcion
     P1OUT ^= BIT0;
-<<<<<<< HEAD
 }
-=======
-}
->>>>>>> origin/pablo

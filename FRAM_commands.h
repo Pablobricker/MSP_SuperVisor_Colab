@@ -102,5 +102,3 @@ void FRAM_erase(int ADDRESS_1,int ADDRESS_2,int ADDRESS_3,int Nbytes){
     }
     eUSCIB0_CS1_set_state(1);
 }
-
-

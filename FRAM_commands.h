@@ -2,7 +2,7 @@
  * FRAM_commands.h
  *
  *  Created on: 28 jun 2023
- *      Author: maxim
+ *      Author: maxim y pablito xd
  */
 
 #ifndef FRAM_COMMANDS_H_
